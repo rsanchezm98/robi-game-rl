@@ -8,43 +8,47 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-BUFFER_SIZE = int(1e5)  # replay buffer size
-BATCH_SIZE = 64  # minibatch size
+BUFFER_SIZE = int(1e3)  # replay buffer size
+BATCH_SIZE = 32  # minibatch size
 GAMMA = 0.99  # discount factor
 TAU = 1e-3  # for soft update of target parameters
-LR = 5e-4  # learning rate
+LR = 1e-4  # learning rate
 UPDATE_EVERY = 4  # how often to update the network
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-class Agent:
+class DQN:
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, update_type, seed):
+    def __init__(self, action_size, seed=42, eps=0.7, eps_decay=0.99, eps_min=0.1, train=False):
         """Initialize an Agent object.
 
         Params
         ======
             qnetwork (torch.nn.Module): model to use as the function approximator
-            state_size (int): dimension of each state
             action_size (int): dimension of each action
-            update_type (str): 'dqn' or 'double-dqn'
             seed (int): random seed
         """
-        self.state_size = state_size
+
         self.action_size = action_size
-        self.seed = random.seed(seed)
+        random.seed(seed)
 
         # Q-Network
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_local = QNetwork(action_size, seed).to(device)
+        self.qnetwork_target = QNetwork(action_size, seed).to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
 
         # Replay memory
         self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
+
+        self.eps = eps
+        self.eps_decay = eps_decay
+        self.eps_min = eps_min
+
+        self.train = train
 
     def step(self, state, action, reward, next_state, done):
         # Save experience in replay memory
@@ -58,7 +62,7 @@ class Agent:
                 experiences = self.memory.sample()
                 self.learn(experiences, GAMMA)
 
-    def act(self, state, eps=0.):
+    def _act_train(self, state):
         """Returns actions for given state as per current policy.
 
         Params
@@ -69,14 +73,30 @@ class Agent:
         state = torch.from_numpy(state).float().unsqueeze(0).to(device)
         self.qnetwork_local.eval()
         with torch.no_grad():
-            action_values = self.qnetwork_local(state)
+            action_values = self.qnetwork_local(state.unsqueeze(0))
         self.qnetwork_local.train()
 
+        self.eps = max(self.eps * self.eps_decay, self.eps_min)
+
         # Epsilon-greedy action selection
-        if random.random() > eps:
+        if random.random() >= self.eps:
             return np.argmax(action_values.cpu().data.numpy())
         else:
             return random.choice(np.arange(self.action_size))
+
+    def _act_test(self, state):
+        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        self.qnetwork_local.eval()
+        with torch.no_grad():
+            action_values = self.qnetwork_local(state.unsqueeze(0))
+
+        return np.argmax(action_values.cpu().data.numpy())
+
+    def act(self, state):
+        if self.train:
+            return self._act_train(state)
+        else:
+            return self._act_test(state)
 
     def learn(self, experiences, gamma):
         """Update value parameters using given batch of experience tuples.
@@ -89,17 +109,18 @@ class Agent:
         states, actions, rewards, next_states, dones = experiences
 
         # Get max predicted Q values (for next states) from target model
-        Q_targets_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
+        output = self.qnetwork_target(next_states).detach()
+        q_targets_next = output.max(1)[0].unsqueeze(1)
 
 
         # Compute Q targets for current states
-        Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
+        q_targets = rewards + (gamma * q_targets_next * (1 - dones))
 
         # Get expected Q values from local model
-        Q_expected = self.qnetwork_local(states).gather(1, actions)
+        q_expected = self.qnetwork_local(states).gather(1, actions)
 
         # Compute loss
-        loss = F.mse_loss(Q_expected, Q_targets)
+        loss = F.mse_loss(q_expected, q_targets)
         # Minimize the loss
         self.optimizer.zero_grad()
         loss.backward()
@@ -151,13 +172,13 @@ class ReplayBuffer:
         """Randomly sample a batch of experiences from memory."""
         experiences = random.sample(self.memory, k=self.batch_size)
 
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(
-            device)
-        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(
-            device)
+        states = torch.from_numpy(np.stack([e.state for e in experiences if e is not None])).float().to(device).unsqueeze(1)
+        actions = torch.from_numpy(np.stack([e.action for e in experiences if e is not None])).long().to(device).unsqueeze(1)
+        rewards = torch.from_numpy(np.stack([e.reward for e in experiences if e is not None])).float().to(device).unsqueeze(1)
+        next_states = torch.from_numpy(np.stack([e.next_state for e in experiences if e is not None])).float().to(
+            device).unsqueeze(1)
+        dones = torch.from_numpy(np.stack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(
+            device).unsqueeze(1)
 
         return states, actions, rewards, next_states, dones
 

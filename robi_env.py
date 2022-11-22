@@ -5,6 +5,7 @@ import time
 
 WINDOW_SIZE = (550, 550)
 
+
 class RobiEnv(gym.Env):
     def __init__(self):
         # Action space
@@ -53,11 +54,22 @@ class RobiEnv(gym.Env):
             info = 'robi fell to lava'
             self._robi_in_lava = True
             done = True
+
+        if (next_y, next_x) == (y, x):
+            reward += -1  # double penalisation if stays in the same place
+
         self._robi_pose = (next_y, next_x)
 
         # move rocks
         for i in range(len(self._rocks_pose)):
             y, x = self._rocks_pose[i]
+
+            if self._robi_pose == self._rocks_pose[i]:
+                info = 'robi collision with a rock'
+                reward += -100
+                done = True
+                break
+
             if y == self._height - 1:
                 self._rocks_pose[i] = (0, x)
             else:
@@ -67,21 +79,24 @@ class RobiEnv(gym.Env):
                 info = 'robi collision with a rock'
                 reward += -100
                 done = True
+                break
+
+        reward += self._robi_pose[1] * 0.5  # rewarding him with distance to goal
 
         if self._robi_pose == self._goal_pose:
             info = 'robi got the goal!'
-            reward += 100
+            reward += 400
             done = True
 
         return self.to_map(), reward, done, info
 
-    def render(self, mode="gui"):
+    def render(self, mode="gui", delta_t=0.1):
         if mode == "gui":
-            self._render_gui()
+            self._render_gui(delta_t=delta_t)
         else:
             print(self.to_map())
 
-    def _render_gui(self):
+    def _render_gui(self, delta_t=0.1):
         if self.window is None:
             pygame.init()
             pygame.display.set_caption("ROBI RL GAME")
@@ -107,7 +122,7 @@ class RobiEnv(gym.Env):
                 pygame.draw.polygon(self.window, color, polygon, 0)
 
         pygame.display.flip()
-        time.sleep(0.1)
+        time.sleep(delta_t)
 
     def to_map(self):
         map_ = np.zeros((self._height, self._width))
